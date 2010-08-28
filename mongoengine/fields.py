@@ -525,10 +525,7 @@ class GridFSProxy(object):
         return self
 
     def get(self, id=None):
-<<<<<<< HEAD
-=======
         if id: self.grid_id = id
->>>>>>> 327452622e3081c81b05916c61454a9fd97d992d
         try: return self.fs.get(id or self.grid_id)
         except: return None # File has been deleted
 
@@ -594,18 +591,6 @@ class FileField(BaseField):
 
     def to_mongo(self, value):
         # Store the GridFS file id in MongoDB
-<<<<<<< HEAD
-        return self.gridfs.grid_id
-
-    def to_python(self, value):
-        # Use stored value (id) to lookup file in GridFS
-        return self.gridfs.get()
-
-    def validate(self, value):
-        assert isinstance(value, GridFSProxy)
-        assert isinstance(value.grid_id, pymongo.objectid.ObjectId)
-
-=======
         if self.gridfs.grid_id is not None:
             return self.gridfs.grid_id
         return None
@@ -639,4 +624,3 @@ class GeoPointField(BaseField):
         if (not isinstance(value[0], (float, int)) and
             not isinstance(value[1], (float, int))):
             raise ValidationError('Both values in point must be float or int.')
->>>>>>> 327452622e3081c81b05916c61454a9fd97d992d
