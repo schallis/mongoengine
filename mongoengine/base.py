@@ -22,6 +22,7 @@ class BaseField(object):
 
     # Fields may have _types inserted into indexes by default 
     _index_with_types = True
+    _geo_index = False
     
     def __init__(self, db_field=None, name=None, required=False, default=None, 
                  unique=False, unique_with=None, primary_key=False,
@@ -338,8 +339,8 @@ class BaseDocument(object):
                 try:
                     field._validate(value)
                 except (ValueError, AttributeError, AssertionError), e:
-                    raise ValidationError('Invalid value for field of type "' +
-                                          field.__class__.__name__ + '"')
+                    raise ValidationError('Invalid value for field of type "%s": %s'
+                                          % (field.__class__.__name__, value))
             elif field.required:
                 raise ValidationError('Field "%s" is required' % field.name)
 

@@ -16,10 +16,9 @@ __all__ = ['StringField', 'IntField', 'FloatField', 'BooleanField',
            'DateTimeField', 'EmbeddedDocumentField', 'ListField', 'DictField',
            'ObjectIdField', 'ReferenceField', 'ValidationError',
            'DecimalField', 'URLField', 'GenericReferenceField', 'FileField',
-           'BinaryField', 'SortedListField', 'EmailField', 'GeoLocationField']
+           'BinaryField', 'SortedListField', 'EmailField', 'GeoPointField']
 
 RECURSIVE_REFERENCE_CONSTANT = 'self'
-
 
 class StringField(BaseField):
     """A unicode string field.
@@ -264,6 +263,7 @@ class ListField(BaseField):
             raise ValidationError('Argument to ListField constructor must be '
                                   'a valid field')
         self.field = field
+        kwargs.setdefault('default', [])
         super(ListField, self).__init__(**kwargs)
 
     def __get__(self, instance, owner):
@@ -356,6 +356,7 @@ class DictField(BaseField):
     def __init__(self, basecls=None, *args, **kwargs):
         self.basecls = basecls or BaseField
         assert issubclass(self.basecls, BaseField)
+        kwargs.setdefault('default', {})
         super(DictField, self).__init__(*args, **kwargs)
 
     def validate(self, value):
@@ -371,24 +372,6 @@ class DictField(BaseField):
 
     def lookup_member(self, member_name):
         return self.basecls(db_field=member_name)
-
-class GeoLocationField(DictField):
-    """Supports geobased fields"""
-    
-    def validate(self, value):
-        """Make sure that a geo-value is of type (x, y)
-        """
-        if not isinstance(value, tuple) and not isinstance(value, list):
-            raise ValidationError('GeoLocationField can only hold tuples or lists of (x, y)')
-        
-        if len(value) <> 2:
-            raise ValidationError('GeoLocationField must have exactly two elements (x, y)')
-    
-    def to_mongo(self, value):
-        return {'x': value[0], 'y': value[1]}
-    
-    def to_python(self, value):
-        return value.keys()
 
 class ReferenceField(BaseField):
     """A reference to a document that will be automatically dereferenced on
@@ -456,7 +439,6 @@ class ReferenceField(BaseField):
     def lookup_member(self, member_name):
         return self.document_type._fields.get(member_name)
 
-
 class GenericReferenceField(BaseField):
     """A reference to *any* :class:`~mongoengine.document.Document` subclass
     that will be automatically dereferenced on access (lazily).
@@ -503,6 +485,7 @@ class GenericReferenceField(BaseField):
     def prepare_query_value(self, op, value):
         return self.to_mongo(value)['_ref']
 
+
 class BinaryField(BaseField):
     """A binary data field.
     """
@@ -542,6 +525,10 @@ class GridFSProxy(object):
         return self
 
     def get(self, id=None):
+<<<<<<< HEAD
+=======
+        if id: self.grid_id = id
+>>>>>>> 327452622e3081c81b05916c61454a9fd97d992d
         try: return self.fs.get(id or self.grid_id)
         except: return None # File has been deleted
 
@@ -607,6 +594,7 @@ class FileField(BaseField):
 
     def to_mongo(self, value):
         # Store the GridFS file id in MongoDB
+<<<<<<< HEAD
         return self.gridfs.grid_id
 
     def to_python(self, value):
@@ -617,3 +605,38 @@ class FileField(BaseField):
         assert isinstance(value, GridFSProxy)
         assert isinstance(value.grid_id, pymongo.objectid.ObjectId)
 
+=======
+        if self.gridfs.grid_id is not None:
+            return self.gridfs.grid_id
+        return None
+
+    def to_python(self, value):
+        # Use stored value (id) to lookup file in GridFS
+        if self.gridfs.grid_id is not None:
+            return self.gridfs.get(id=value)
+        return None
+
+    def validate(self, value):
+        if value.grid_id is not None:
+            assert isinstance(value, GridFSProxy)
+            assert isinstance(value.grid_id, pymongo.objectid.ObjectId)
+
+class GeoPointField(BaseField):
+    """A list storing a latitude and longitude.
+    """
+
+    _geo_index = True
+
+    def validate(self, value):
+        """Make sure that a geo-value is of type (x, y)
+        """
+        if not isinstance(value, (list, tuple)):
+            raise ValidationError('GeoPointField can only accept tuples or '
+                                  'lists of (x, y)')
+        
+        if not len(value) == 2:
+            raise ValidationError('Value must be a two-dimensional point.')
+        if (not isinstance(value[0], (float, int)) and
+            not isinstance(value[1], (float, int))):
+            raise ValidationError('Both values in point must be float or int.')
+>>>>>>> 327452622e3081c81b05916c61454a9fd97d992d
