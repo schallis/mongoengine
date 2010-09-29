@@ -23,7 +23,7 @@ class BaseField(object):
     # Fields may have _types inserted into indexes by default 
     _index_with_types = True
     _geo_index = False
-    
+
     def __init__(self, db_field=None, name=None, required=False, default=None, 
                  unique=False, unique_with=None, primary_key=False,
                  validation=None, choices=None):
@@ -89,7 +89,7 @@ class BaseField(object):
             if value not in self.choices:
                 raise ValidationError("Value must be one of %s."
                     % unicode(self.choices))
-        
+
         # check validation argument
         if self.validation is not None:
             if callable(self.validation):
@@ -98,13 +98,13 @@ class BaseField(object):
                                           'validation method.')
             else:
                 raise ValueError('validation argument must be a callable.')
-    
+
         self.validate(value)
 
 class ObjectIdField(BaseField):
     """An field wrapper around MongoDB's ObjectIds.
     """
-    
+
     def to_python(self, value):
         return value
         # return unicode(value)
@@ -150,7 +150,7 @@ class DocumentMetaclass(type):
                 # Get superclasses from superclass
                 superclasses[base._class_name] = base
                 superclasses.update(base._superclasses)
-                
+
             if hasattr(base, '_meta'):
                 # Ensure that the Document class may be subclassed - 
                 # inheritance may be disabled to remove dependency on 
@@ -191,20 +191,20 @@ class DocumentMetaclass(type):
             field.owner_document = new_class
 
         module = attrs.get('__module__')
-        
+
         base_excs = tuple(base.DoesNotExist for base in bases 
                           if hasattr(base, 'DoesNotExist')) or (DoesNotExist,)
         exc = subclass_exception('DoesNotExist', base_excs, module)
         new_class.add_to_class('DoesNotExist', exc)
-        
+
         base_excs = tuple(base.MultipleObjectsReturned for base in bases 
                           if hasattr(base, 'MultipleObjectsReturned'))
         base_excs = base_excs or (MultipleObjectsReturned,)
         exc = subclass_exception('MultipleObjectsReturned', base_excs, module)
         new_class.add_to_class('MultipleObjectsReturned', exc)
-    
+
         return new_class
-        
+
     def add_to_class(self, name, value):
         setattr(self, name, value)
 
@@ -227,14 +227,20 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
             return super_new(cls, name, bases, attrs)
 
         collection = name.lower()
-        
+
         id_field = None
         base_indexes = []
+        base_meta = {}
 
         # Subclassed documents inherit collection from superclass
         for base in bases:
             if hasattr(base, '_meta') and 'collection' in base._meta:
                 collection = base._meta['collection']
+
+                # Propagate index options.
+                for key in ('index_background', 'index_drop_dups', 'index_opts'):
+                   if key in base._meta:
+                      base_meta[key] = base._meta[key]
 
                 id_field = id_field or base._meta.get('id_field')
                 base_indexes += base._meta.get('indexes', [])
@@ -246,7 +252,12 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
             'ordering': [], # default ordering applied at runtime
             'indexes': [], # indexes to be ensured at runtime
             'id_field': id_field,
+            'index_background': False,
+            'index_drop_dups': False,
+            'index_opts': {},
+            'queryset_class': QuerySet,
         }
+        meta.update(base_meta)
 
         # Apply document-defined meta options
         meta.update(attrs.get('meta', {}))
@@ -255,18 +266,21 @@ class TopLevelDocumentMetaclass(DocumentMetaclass):
         # Set up collection manager, needs the class to have fields so use
         # DocumentMetaclass before instantiating CollectionManager object
         new_class = super_new(cls, name, bases, attrs)
-        new_class.objects = QuerySetManager()
+
+        # Provide a default queryset unless one has been manually provided
+        if not hasattr(new_class, 'objects'):
+            new_class.objects = QuerySetManager()
 
         user_indexes = [QuerySet._build_index_spec(new_class, spec)
                         for spec in meta['indexes']] + base_indexes
         new_class._meta['indexes'] = user_indexes
-        
+
         unique_indexes = []
         for field_name, field in new_class._fields.items():
             # Generate a list of indexes needed by uniqueness constraints
             if field.unique:
                 field.required = True
-                unique_fields = [field_name]
+                unique_fields = [field.db_field]
 
                 # Add any unique_with fields to the back of the index spec
                 if field.unique_with:
@@ -415,8 +429,10 @@ class BaseDocument(object):
                 self._meta.get('allow_inheritance', True) == False):
             data['_cls'] = self._class_name
             data['_types'] = self._superclasses.keys() + [self._class_name]
+        if data.has_key('_id') and not data['_id']:
+            del data['_id']
         return data
-    
+
     @classmethod
     def _from_son(cls, son):
         """Create an instance of a Document (subclass) from a PyMongo SON.
@@ -446,12 +462,14 @@ class BaseDocument(object):
 
         for field_name, field in cls._fields.items():
             if field.db_field in data:
-                data[field_name] = field.to_python(data[field.db_field])
+                value = data[field.db_field]
+                data[field_name] = (value if value is None
+                                    else field.to_python(value))
 
         obj = cls(**data)
         obj._present_fields = present_fields
         return obj
-    
+
     def __eq__(self, other):
         if isinstance(other, self.__class__) and hasattr(other, 'id'):
             if self.id == other.id:

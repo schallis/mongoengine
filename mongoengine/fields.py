@@ -38,7 +38,7 @@ class StringField(BaseField):
 
         if self.max_length is not None and len(value) > self.max_length:
             raise ValidationError('String value is too long')
-        
+
         if self.min_length is not None and len(value) < self.min_length:
             raise ValidationError('String value is too short')
 
@@ -66,6 +66,9 @@ class StringField(BaseField):
                 regex = r'%s$'
             elif op == 'exact':
                 regex = r'^%s$'
+
+            # escape unsafe characters which could lead to a re.error
+            value = re.escape(value)
             value = re.compile(regex % value, flags)
         return value
 
@@ -111,7 +114,7 @@ class EmailField(StringField):
         r'|^"([\001-\010\013\014\016-\037!#-\[\]-\177]|\\[\001-011\013\014\016-\177])*"' # quoted-string
         r')@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?$', re.IGNORECASE # domain
     )
-    
+
     def validate(self, value):
         if not EmailField.EMAIL_REGEX.match(value):
             raise ValidationError('Invalid Mail-address: %s' % value)
@@ -175,7 +178,7 @@ class DecimalField(BaseField):
         if not isinstance(value, basestring):
             value = unicode(value)
         return decimal.Decimal(value)
-    
+
     def to_mongo(self, value):
         return unicode(value)
 
@@ -263,7 +266,7 @@ class ListField(BaseField):
             raise ValidationError('Argument to ListField constructor must be '
                                   'a valid field')
         self.field = field
-        kwargs.setdefault('default', [])
+        kwargs.setdefault('default', lambda: [])
         super(ListField, self).__init__(**kwargs)
 
     def __get__(self, instance, owner):
@@ -343,7 +346,8 @@ class SortedListField(ListField):
 
     def to_mongo(self, value):
         if self._ordering is not None:
-            return sorted([self.field.to_mongo(item) for item in value], key=itemgetter(self._ordering))
+            return sorted([self.field.to_mongo(item) for item in value],
+                          key=itemgetter(self._ordering))
         return sorted([self.field.to_mongo(item) for item in value])
 
 class DictField(BaseField):
@@ -356,7 +360,7 @@ class DictField(BaseField):
     def __init__(self, basecls=None, *args, **kwargs):
         self.basecls = basecls or BaseField
         assert issubclass(self.basecls, BaseField)
-        kwargs.setdefault('default', {})
+        kwargs.setdefault('default', lambda: {})
         super(DictField, self).__init__(*args, **kwargs)
 
     def validate(self, value):
@@ -507,39 +511,57 @@ class BinaryField(BaseField):
         if self.max_bytes is not None and len(value) > self.max_bytes:
             raise ValidationError('Binary value is too long')
 
+
+class GridFSError(Exception):
+    pass
+
+
 class GridFSProxy(object):
     """Proxy object to handle writing and reading of files to and from GridFS
+
+    .. versionadded:: 0.4
     """
 
-    def __init__(self):
+    def __init__(self, grid_id=None):
         self.fs = gridfs.GridFS(_get_db())  # Filesystem instance
         self.newfile = None                 # Used for partial writes
-        self.grid_id = None                 # Store GridFS id for file
+        self.grid_id = grid_id              # Store GridFS id for file
 
     def __getattr__(self, name):
         obj = self.get()
         if name in dir(obj):
             return getattr(obj, name)
+        raise AttributeError
 
     def __get__(self, instance, value):
         return self
 
     def get(self, id=None):
-        if id: self.grid_id = id
-        try: return self.fs.get(id or self.grid_id)
-        except: return None # File has been deleted
+        if id:
+            self.grid_id = id
+        try:
+            return self.fs.get(id or self.grid_id)
+        except:
+            # File has been deleted
+            return None
 
     def new_file(self, **kwargs):
         self.newfile = self.fs.new_file(**kwargs)
         self.grid_id = self.newfile._id
 
     def put(self, file, **kwargs):
+        if self.grid_id:
+            raise GridFSError('This document alreay has a file. Either delete '
+                              'it or call replace to overwrite it')
         self.grid_id = self.fs.put(file, **kwargs)
 
     def write(self, string):
-        if not self.newfile:
+        if self.grid_id:
+            if not self.newfile:
+                raise GridFSError('This document alreay has a file. Either '
+                                  'delete it or call replace to overwrite it')
+        else:
             self.new_file()
-            self.grid_id = self.newfile._id
         self.newfile.write(string)
 
     def writelines(self, lines):
@@ -549,13 +571,19 @@ class GridFSProxy(object):
         self.newfile.writelines(lines) 
 
     def read(self):
-        try: return self.get().read()
-        except: return None
+        try:
+            return self.get().read()
+        except:
+            return None
 
     def delete(self):
         # Delete file from GridFS, FileField still remains
         self.fs.delete(self.grid_id)
-        self.grid_id = None
+
+        #self.grid_id = None
+        # Doesn't make a difference because will be put back in when
+        # reinstantiated We should delete all the metadata stored with the
+        # file too
 
     def replace(self, file, **kwargs):
         self.delete()
@@ -568,43 +596,61 @@ class GridFSProxy(object):
             msg = "The close() method is only necessary after calling write()"
             warnings.warn(msg)
 
+
 class FileField(BaseField):
     """A GridFS storage field.
+
+    .. versionadded:: 0.4
     """
 
     def __init__(self, **kwargs):
-        self.gridfs = GridFSProxy()
         super(FileField, self).__init__(**kwargs)
 
     def __get__(self, instance, owner):
         if instance is None:
             return self
 
-        return self.gridfs
+        # Check if a file already exists for this model
+        grid_file = instance._data.get(self.name)
+        self.grid_file = grid_file
+        if self.grid_file:
+            return self.grid_file
+        return GridFSProxy()
 
     def __set__(self, instance, value):
         if isinstance(value, file) or isinstance(value, str):
             # using "FileField() = file/string" notation
-            self.gridfs.put(value)
+            grid_file = instance._data.get(self.name)
+            # If a file already exists, delete it
+            if grid_file:
+                try:
+                    grid_file.delete()
+                except:
+                    pass
+                # Create a new file with the new data
+                grid_file.put(value)
+            else:
+                # Create a new proxy object as we don't already have one
+                instance._data[self.name] = GridFSProxy()
+                instance._data[self.name].put(value)
         else:
             instance._data[self.name] = value
 
     def to_mongo(self, value):
         # Store the GridFS file id in MongoDB
-        if self.gridfs.grid_id is not None:
-            return self.gridfs.grid_id
+        if isinstance(value, GridFSProxy) and value.grid_id is not None:
+            return value.grid_id
         return None
 
     def to_python(self, value):
-        # Use stored value (id) to lookup file in GridFS
-        if self.gridfs.grid_id is not None:
-            return self.gridfs.get(id=value)
-        return None
+        if value is not None:
+            return GridFSProxy(value)
 
     def validate(self, value):
         if value.grid_id is not None:
             assert isinstance(value, GridFSProxy)
             assert isinstance(value.grid_id, pymongo.objectid.ObjectId)
+
 
 class GeoPointField(BaseField):
     """A list storing a latitude and longitude.
@@ -618,7 +664,7 @@ class GeoPointField(BaseField):
         if not isinstance(value, (list, tuple)):
             raise ValidationError('GeoPointField can only accept tuples or '
                                   'lists of (x, y)')
-        
+
         if not len(value) == 2:
             raise ValidationError('Value must be a two-dimensional point.')
         if (not isinstance(value[0], (float, int)) and

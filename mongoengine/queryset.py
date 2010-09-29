@@ -135,7 +135,6 @@ class Q(object):
 
         # Handle DBRef
         if isinstance(value, pymongo.dbref.DBRef):
-            # this.created_user.$id == "4c4c56f8cc1831418c000000"
             op_js = '(this.%(field)s.$id == "%(id)s" &&'\
                     ' this.%(field)s.$ref == "%(ref)s")' % {
                         'field': key,
@@ -164,7 +163,7 @@ class QuerySet(object):
         self._where_clause = None
         self._loaded_fields = []
         self._ordering = []
-        
+
         # If inheritance is allowed, only return instances and instances of
         # subclasses of the class being used
         if document._meta.get('allow_inheritance'):
@@ -173,7 +172,8 @@ class QuerySet(object):
         self._limit = None
         self._skip = None
 
-    def ensure_index(self, key_or_list):
+    def ensure_index(self, key_or_list, drop_dups=False, background=False,
+        **kwargs):
         """Ensure that the given indexes are in place.
 
         :param key_or_list: a single index key or a list of index keys (to
@@ -181,7 +181,8 @@ class QuerySet(object):
             or a **-** to determine the index ordering
         """
         index_list = QuerySet._build_index_spec(self._document, key_or_list)
-        self._collection.ensure_index(index_list)
+        self._collection.ensure_index(index_list, drop_dups=drop_dups,
+            background=background)
         return self
 
     @classmethod
@@ -240,6 +241,10 @@ class QuerySet(object):
         """
         return self.__call__(*q_objs, **query)
 
+    def all(self):
+        """Returns all documents."""
+        return self.__call__()
+
     @property
     def _collection(self):
         """Property that returns the collection object. This allows us to
@@ -247,25 +252,33 @@ class QuerySet(object):
         """
         if not self._accessed_collection:
             self._accessed_collection = True
-            
+
+            background = self._document._meta.get('index_background', False)
+            drop_dups = self._document._meta.get('index_drop_dups', False)
+            index_opts = self._document._meta.get('index_options', {})
+
             # Ensure document-defined indexes are created
             if self._document._meta['indexes']:
                 for key_or_list in self._document._meta['indexes']:
-                    self._collection.ensure_index(key_or_list)
+                    self._collection.ensure_index(key_or_list,
+                        background=background, **index_opts)
 
             # Ensure indexes created by uniqueness constraints
             for index in self._document._meta['unique_indexes']:
-                self._collection.ensure_index(index, unique=True)
-                
+                self._collection.ensure_index(index, unique=True,
+                    background=background, drop_dups=drop_dups, **index_opts)
+
             # If _types is being used (for polymorphism), it needs an index
             if '_types' in self._query:
-                self._collection.ensure_index('_types')
-            
+                self._collection.ensure_index('_types',
+                    background=background, **index_opts)
+
             # Ensure all needed field indexes are created
             for field in self._document._fields.values():
                 if field.__class__._geo_index:
                     index_spec = [(field.db_field, pymongo.GEO2D)]
-                    self._collection.ensure_index(index_spec)
+                    self._collection.ensure_index(index_spec,
+                        background=background, **index_opts)
 
         return self._collection_obj
 
@@ -331,6 +344,8 @@ class QuerySet(object):
         mongo_query = {}
         for key, value in query.items():
             parts = key.split('__')
+            indices = [(i, p) for i, p in enumerate(parts) if p.isdigit()]
+            parts = [part for part in parts if not part.isdigit()]
             # Check for an operator and transform to mongo-style if there is
             op = None
             if parts[-1] in operators + match_operators + geo_operators:
@@ -368,7 +383,9 @@ class QuerySet(object):
                                                   "been implemented" % op)
                 elif op not in match_operators:
                     value = {'$' + op: value}
-
+            
+            for i, part in indices:
+                parts.insert(i, part)
             key = '.'.join(parts)
             if op is None or key not in mongo_query:
                 mongo_query[key] = value
@@ -458,7 +475,7 @@ class QuerySet(object):
 
     def in_bulk(self, object_ids):
         """Retrieve a set of documents by their ids.
-        
+
         :param object_ids: a list or tuple of ``ObjectId``\ s
         :rtype: dict of ObjectIds as keys and collection-specific
                 Document subclasses as values.
@@ -470,7 +487,7 @@ class QuerySet(object):
         docs = self._collection.find({'_id': {'$in': object_ids}})
         for doc in docs:
             doc_map[doc['_id']] = self._document._from_son(doc)
- 
+
         return doc_map
 
     def next(self):
@@ -624,7 +641,7 @@ class QuerySet(object):
         # Integer index provided
         elif isinstance(key, int):
             return self._document._from_son(self._cursor[key])
-    
+
     def distinct(self, field):
         """Return a list of distinct values for a given field.
 
@@ -636,9 +653,9 @@ class QuerySet(object):
 
     def only(self, *fields):
         """Load only a subset of this document's fields. ::
-        
+
             post = BlogPost.objects(...).only("title")
-        
+
         :param fields: fields to include
 
         .. versionadded:: 0.3
@@ -667,11 +684,13 @@ class QuerySet(object):
         """
         key_list = []
         for key in keys:
+            if not key: continue
             direction = pymongo.ASCENDING
             if key[0] == '-':
                 direction = pymongo.DESCENDING
             if key[0] in ('-', '+'):
                 key = key[1:]
+            key = key.replace('__', '.')
             key_list.append((key, direction))
 
         self._ordering = key_list
@@ -701,8 +720,8 @@ class QuerySet(object):
     def _transform_update(cls, _doc_cls=None, **update):
         """Transform an update spec from Django-style format to Mongo format.
         """
-        operators = ['set', 'unset', 'inc', 'dec', 'push', 'push_all', 'pull',
-                     'pull_all']
+        operators = ['set', 'unset', 'inc', 'dec', 'pop', 'push', 'push_all',
+                     'pull', 'pull_all']
 
         mongo_update = {}
         for key, value in update.items():
@@ -728,7 +747,7 @@ class QuerySet(object):
 
                 # Convert value to proper value
                 field = fields[-1]
-                if op in (None, 'set', 'unset', 'push', 'pull'):
+                if op in (None, 'set', 'unset', 'pop', 'push', 'pull'):
                     value = field.prepare_query_value(op, value)
                 elif op in ('pushAll', 'pullAll'):
                     value = [field.prepare_query_value(op, v) for v in value]
@@ -747,7 +766,8 @@ class QuerySet(object):
         return mongo_update
 
     def update(self, safe_update=True, upsert=False, **update):
-        """Perform an atomic update on the fields matched by the query.
+        """Perform an atomic update on the fields matched by the query. When 
+        ``safe_update`` is used, the number of affected documents is returned.
 
         :param safe: check if the operation succeeded before returning
         :param update: Django-style update keyword arguments
@@ -759,8 +779,10 @@ class QuerySet(object):
 
         update = QuerySet._transform_update(self._document, **update)
         try:
-            self._collection.update(self._query, update, safe=safe_update, 
-                                    upsert=upsert, multi=True)
+            ret = self._collection.update(self._query, update, multi=True,
+                                          upsert=upsert, safe=safe_update)
+            if ret is not None and 'n' in ret:
+                return ret['n']
         except pymongo.errors.OperationFailure, err:
             if unicode(err) == u'multi not coded yet':
                 message = u'update() method requires MongoDB 1.1.3+'
@@ -768,7 +790,8 @@ class QuerySet(object):
             raise OperationError(u'Update failed (%s)' % unicode(err))
 
     def update_one(self, safe_update=True, upsert=False, **update):
-        """Perform an atomic update on first field matched by the query.
+        """Perform an atomic update on first field matched by the query. When 
+        ``safe_update`` is used, the number of affected documents is returned.
 
         :param safe: check if the operation succeeded before returning
         :param update: Django-style update keyword arguments
@@ -780,11 +803,14 @@ class QuerySet(object):
             # Explicitly provide 'multi=False' to newer versions of PyMongo
             # as the default may change to 'True'
             if pymongo.version >= '1.1.1':
-                self._collection.update(self._query, update, safe=safe_update, 
-                                        upsert=upsert, multi=False)
+                ret = self._collection.update(self._query, update, multi=False,
+                                              upsert=upsert, safe=safe_update)
             else:
                 # Older versions of PyMongo don't support 'multi'
-                self._collection.update(self._query, update, safe=safe_update)
+                ret = self._collection.update(self._query, update,
+                                              safe=safe_update)
+            if ret is not None and 'n' in ret:
+                return ret['n']
         except pymongo.errors.OperationFailure, e:
             raise OperationError(u'Update failed [%s]' % unicode(e))
 
@@ -877,7 +903,7 @@ class QuerySet(object):
                 var total = 0.0;
                 var num = 0;
                 db[collection].find(query).forEach(function(doc) {
-                    if (doc[averageField]) {
+                    if (doc[averageField] !== undefined) {
                         total += doc[averageField];
                         num += 1;
                     }
@@ -973,7 +999,8 @@ class QuerySetManager(object):
                 self._collection = db[collection]
 
         # owner is the document that contains the QuerySetManager
-        queryset = QuerySet(owner, self._collection)
+        queryset_class = owner._meta['queryset_class'] or QuerySet
+        queryset = queryset_class(owner, self._collection)
         if self._manager_func:
             if self._manager_func.func_code.co_argcount == 1:
                 queryset = self._manager_func(queryset)

@@ -45,7 +45,7 @@ class FieldTest(unittest.TestCase):
         """
         class Person(Document):
             name = StringField()
-        
+
         person = Person(name='Test User')
         self.assertEqual(person.id, None)
 
@@ -95,7 +95,7 @@ class FieldTest(unittest.TestCase):
 
         link.url = 'http://www.google.com:8080'
         link.validate()
-        
+
     def test_int_validation(self):
         """Ensure that invalid values cannot be assigned to int fields.
         """
@@ -129,7 +129,7 @@ class FieldTest(unittest.TestCase):
         self.assertRaises(ValidationError, person.validate)
         person.height = 4.0
         self.assertRaises(ValidationError, person.validate)
-        
+
     def test_decimal_validation(self):
         """Ensure that invalid values cannot be assigned to decimal fields.
         """
@@ -228,7 +228,8 @@ class FieldTest(unittest.TestCase):
 
         class BlogPost(Document):
             content = StringField()
-            comments = SortedListField(EmbeddedDocumentField(Comment), ordering='order')
+            comments = SortedListField(EmbeddedDocumentField(Comment),
+                                       ordering='order')
             tags = SortedListField(StringField())
 
         post = BlogPost(content='Went for a walk today...')
@@ -238,7 +239,7 @@ class FieldTest(unittest.TestCase):
         post.save()
         post.reload()
         self.assertEqual(post.tags, ['fun', 'leisure'])
-        
+
         comment1 = Comment(content='Good for you', order=1)
         comment2 = Comment(content='Yay.', order=0)
         comments = [comment1, comment2]
@@ -316,7 +317,7 @@ class FieldTest(unittest.TestCase):
         class BlogPost(Document):
             content = StringField()
             author = EmbeddedDocumentField(User)
-        
+
         post = BlogPost(content='What I did today...')
         post.author = User(name='Test User')
         post.author = PowerUser(name='Test User', power=47)
@@ -359,7 +360,7 @@ class FieldTest(unittest.TestCase):
 
         User.drop_collection()
         BlogPost.drop_collection()
-    
+
     def test_list_item_dereference(self):
         """Ensure that DBRef items in ListFields are dereferenced.
         """
@@ -455,46 +456,46 @@ class FieldTest(unittest.TestCase):
 
         Member.drop_collection()
         BlogPost.drop_collection()
-        
+
     def test_generic_reference(self):
         """Ensure that a GenericReferenceField properly dereferences items.
         """
         class Link(Document):
             title = StringField()
             meta = {'allow_inheritance': False}
-            
+
         class Post(Document):
             title = StringField()
-            
+
         class Bookmark(Document):
             bookmark_object = GenericReferenceField()
-            
+
         Link.drop_collection()
         Post.drop_collection()
         Bookmark.drop_collection()
-    
+
         link_1 = Link(title="Pitchfork")
         link_1.save()
-    
+
         post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
         post_1.save()
-        
+
         bm = Bookmark(bookmark_object=post_1)
         bm.save()
-        
+
         bm = Bookmark.objects(bookmark_object=post_1).first()
-        
+
         self.assertEqual(bm.bookmark_object, post_1)
         self.assertTrue(isinstance(bm.bookmark_object, Post))
-        
+
         bm.bookmark_object = link_1
         bm.save()
-        
+
         bm = Bookmark.objects(bookmark_object=link_1).first()
-        
+
         self.assertEqual(bm.bookmark_object, link_1)
         self.assertTrue(isinstance(bm.bookmark_object, Link))
-    
+
         Link.drop_collection()
         Post.drop_collection()
         Bookmark.drop_collection()
@@ -504,31 +505,31 @@ class FieldTest(unittest.TestCase):
         """
         class Link(Document):
             title = StringField()
-    
+
         class Post(Document):
             title = StringField()
-    
+
         class User(Document):
             bookmarks = ListField(GenericReferenceField())
-    
+
         Link.drop_collection()
         Post.drop_collection()
         User.drop_collection()
-    
+
         link_1 = Link(title="Pitchfork")
         link_1.save()
-    
+
         post_1 = Post(title="Behind the Scenes of the Pavement Reunion")
         post_1.save()
-    
+
         user = User(bookmarks=[post_1, link_1])
         user.save()
-        
+
         user = User.objects(bookmarks__all=[post_1, link_1]).first()
-        
+
         self.assertEqual(user.bookmarks[0], post_1)
         self.assertEqual(user.bookmarks[1], link_1)
-        
+
         Link.drop_collection()
         Post.drop_collection()
         User.drop_collection()
@@ -674,7 +675,34 @@ class FieldTest(unittest.TestCase):
         PutFile.drop_collection()
         StreamFile.drop_collection()
         SetFile.drop_collection()
-        
+
+        # Make sure FileField is optional and not required
+        class DemoFile(Document):
+            file = FileField()
+        d = DemoFile.objects.create()
+
+    def test_file_uniqueness(self):
+        """Ensure that each instance of a FileField is unique
+        """
+        class TestFile(Document):
+            name = StringField()
+            file = FileField()
+
+        # First instance
+        testfile = TestFile()
+        testfile.name = "Hello, World!"
+        testfile.file.put('Hello, World!')
+        testfile.save()
+
+        # Second instance
+        testfiledupe = TestFile()
+        data = testfiledupe.file.read() # Should be None
+
+        self.assertTrue(testfile.name != testfiledupe.name)
+        self.assertTrue(testfile.file.read() != data)
+
+        TestFile.drop_collection()
+
     def test_geo_indexes(self):
         """Ensure that indexes are created automatically for GeoPointFields.
         """
@@ -692,6 +720,19 @@ class FieldTest(unittest.TestCase):
         self.assertTrue(info[u'location_2d']['key'] == [(u'location', u'2d')])
 
         Event.drop_collection()
+
+    def test_ensure_unique_default_instances(self):
+        """Ensure that every field has it's own unique default instance."""
+        class D(Document):
+            data = DictField()
+            data2 = DictField(default=lambda: {})
+
+        d1 = D()
+        d1.data['foo'] = 'bar'
+        d1.data2['foo'] = 'bar'
+        d2 = D()
+        self.assertEqual(d2.data, {})
+        self.assertEqual(d2.data2, {})
 
 if __name__ == '__main__':
     unittest.main()
